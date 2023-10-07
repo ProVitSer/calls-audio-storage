@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"time"
+	"strings"
 	"database/sql"
 	"net/http"
 	_"encoding/json"
@@ -20,6 +21,8 @@ const (
 	BucketName = "pbx-recording"
 	CallCompanyPath = "audio/call-company"
 	CallClientPath = "audio/call-client"
+	CallLegsAPrefix = "-in"
+	CallLegsBPrefix = "-out"
 )
 
 var (
@@ -44,13 +47,18 @@ type CallInfo struct {
 type handler func(w http.ResponseWriter, r *http.Request)
 
 type RequestData struct {
-    Uniqueid string `json:"uniqueid"`
+    Uniqueid 	string `json:"uniqueid"`
+}
+
+type RecordingsInfo struct {
+    S3LegsPath   string
+    RecordName 	 string
 }
 
 
 func checkErr(err error) {
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 	}
 }
 
@@ -58,32 +66,54 @@ func set_call_controll_info(uniqueid string){
 
 	time.Sleep(30 * time.Second)
 
-
 	call_info := get_call_info(uniqueid)
 
-	full_record_path := get_recording_path(call_info.Recordingfile)
-	fmt.Println(call_info.Recordingfile)
+	record_name := strings.TrimSuffix(call_info.Recordingfile, ".wav")
 
-	fmt.Println(full_record_path)
-	fmt.Println(fmt.Sprintf("%s/%s", full_record_path, get_date_path()))
+	records_info := get_recordings_info(record_name)
 
-	
-	// save_recoding_to_s3(full_record_path, fmt.Sprintf("%s/%s", CallCompanyPath, get_date_path()))
+	save_and_del_record(records_info)
 
+}
+
+func save_and_del_record(records_info []RecordingsInfo){
+	for _, obj := range records_info {
+		save_recoding_to_s3(get_recording_path(obj.RecordName), obj.S3LegsPath)
+		del_recording_file(get_recording_path(obj.RecordName))
+    }
+}
+
+func del_recording_file(recording_path string){
+	err := os.Remove(recording_path)
+    if err != nil {
+        log.Println("Ошибка удаления файла:", err)
+        return
+    }
+
+    log.Println("Файл успешно удален")
+}
+
+func get_recordings_info(record_name string)([]RecordingsInfo){
+	recordObjects := []RecordingsInfo{
+        {S3LegsPath: CallClientPath, RecordName: fmt.Sprintf("%s%s.wav", record_name, CallLegsAPrefix)},
+        {S3LegsPath: CallCompanyPath, RecordName: fmt.Sprintf("%s%s.wav", record_name, CallLegsBPrefix)},
+    }
+
+	return recordObjects
 }
 
 func save_recoding_to_s3(localRecordFilePath string, s3FolderPath string){
 
-    cmd := exec.Command("s3cmd", "put", localRecordFilePath, fmt.Sprintf("s3://%s/%s", BucketName, s3FolderPath))
+    cmd := exec.Command("s3cmd", "put", localRecordFilePath, fmt.Sprintf("s3://%s/%s/%s", BucketName, s3FolderPath, get_date_path()))
 
     output, err := cmd.CombinedOutput()
     if err != nil {
-        fmt.Println("Ошибка при выполнении команды s3cmd:", err)
+        log.Println("Ошибка при выполнении команды s3cmd:", err)
         return
     }
 
-    fmt.Println("Результат выполнения команды s3cmd:")
-    fmt.Println(string(output))
+    log.Println("Результат выполнения команды s3cmd:")
+    log.Println(string(output))
 }
 
 
@@ -168,6 +198,15 @@ func goDotEnvVariable(key string) string {
   
 
 func main() {
+	logFile, err := os.OpenFile("app.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
+
+    if err != nil {
+        log.Fatal("Ошибка открытия файла логов:", err)
+    }
+
+    defer logFile.Close()
+
+    log.SetOutput(logFile)
 
     connectionString := fmt.Sprintf("%s:%s@(%s:%s)/%s", goDotEnvVariable("MYSQL_USERNAME"), goDotEnvVariable("MYSQL_PASSWORD"), "127.0.0.1", "3306", "asteriskcdrdb")
 
